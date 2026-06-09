@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>CCPA 手機解封包(Web Bluetooth)</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; font-family: -apple-system, system-ui, sans-serif;
+           background: #0d1117; color: #e6edf3; padding: 16px; }
+    h1 { font-size: 17px; margin: 0 0 12px; font-weight: 600; }
+    #connectBtn {
+      width: 100%; padding: 16px; font-size: 17px; font-weight: 600;
+      border: none; border-radius: 14px; background: #238636; color: #fff;
+      margin-bottom: 10px;
+    }
+    #connectBtn:disabled { background: #30363d; color: #8b949e; }
+    #status { font-size: 13px; color: #8b949e; text-align: center; margin-bottom: 16px; }
+    #status.on { color: #3fb950; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(2, 1fr); }
+    .card { background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 12px 14px; }
+    .label { font-size: 11px; color: #7d8590; }
+    .value { font-size: 26px; font-weight: 650; margin-top: 4px; line-height: 1; }
+    .unit { font-size: 12px; color: #7d8590; font-weight: 400; margin-left: 3px; }
+    .wide { grid-column: 1 / -1; }
+    h2 { font-size: 12px; color: #7d8590; margin: 18px 0 6px; font-weight: 500; }
+    #raw { background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 10px;
+           font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #8b949e;
+           height: 130px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>CCPA 車況 · 手機解封包</h1>
+  <button id="connectBtn">🔗 連線到 CCPA-Telemetry</button>
+  <div id="status">尚未連線</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">車速</div><div class="value"><span id="speed">--</span><span class="unit">kph</span></div></div>
+    <div class="card"><div class="label">踏頻</div><div class="value"><span id="cadence">--</span><span class="unit">rpm</span></div></div>
+    <div class="card"><div class="label">扭力</div><div class="value"><span id="torque">--</span><span class="unit">Nm</span></div></div>
+    <div class="card"><div class="label">馬達轉速</div><div class="value"><span id="motor_rpm">--</span><span class="unit">rpm</span></div></div>
+    <div class="card"><div class="label">馬達溫度</div><div class="value"><span id="motor_temp">--</span><span class="unit">°C</span></div></div>
+    <div class="card"><div class="label">助力模式</div><div class="value"><span id="mode">--</span></div></div>
+    <div class="card"><div class="label">電量</div><div class="value"><span id="soc">--</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">電壓</div><div class="value"><span id="vmv">--</span><span class="unit">V</span></div></div>
+    <div class="card"><div class="label">電流</div><div class="value"><span id="ima">--</span><span class="unit">A</span></div></div>
+    <div class="card"><div class="label">後檔位</div><div class="value"><span id="gear">--</span></div></div>
+    <div class="card wide"><div class="label">電池溫度</div><div class="value" id="temps" style="font-size:20px">-- / -- / -- / --</div></div>
+  </div>
+
+  <h2>收到的原始 frame(解封包前)</h2>
+  <div id="raw"></div>
+
+  <script>
+  // ───────────────────────────────────────────────────────────────────────
+  //  解封包引擎(與 ccpa_decode.js 相同邏輯,內建以便單檔在 Bluefy 直接跑)
+  // ───────────────────────────────────────────────────────────────────────
+  const ID = {
+    GENERAL_INFO00ACK:0x29404FC, GENERAL_INFO00BRO:0x29404FE,
+    GENERAL_INFO01ACK:0x29404F8, GENERAL_INFO01BRO:0x29404FA,
+    ASSISTREQ:0x2940015,
+    CONTROLLER_INFO00ACK:0x1E942040, CONTROLLER_INFO00BRO:0x1E942042,
+    CONTROLLER_INFO02ACK:0x1E942048, CONTROLLER_INFO02BRO:0x1E94204A,
+    CONTROLLER_INFO03ACK:0x1E94204C, CONTROLLER_INFO03BRO:0x1E94204E,
+    BAT1_INFO01ACK:0x1E942444, BAT1_INFO01BRO:0x1E942446,
+    BAT1_INFO06ACK:0x1E942458, BAT1_INFO06BRO:0x1E94245A,
+    REARDERAILLEUR_INFO00ACK:0x1E944840, REARDERAILLEUR_INFO00BRO:0x1E944842,
+  };
+  const SRC = { NONE:0, GENERAL:1, DEVICE:2 };
+  const u16le = (d,i) => d[i] | (d[i+1]<<8);
+  const u24le = (d,i) => d[i] | (d[i+1]<<8) | (d[i+2]<<16);
+  const tempC = (r) => r - 64;
+
+  class CcpaDecoder {
+    constructor(){ this.state = {
+      bikeSpeedValid:false, bikeSpeedKph:0, bikeSpeedSource:SRC.NONE,
+      cadenceValid:false, cadenceRpm:0, cadenceSource:SRC.NONE,
+      riderTorqueValid:false, riderTorqueNm:0, riderTorqueSource:SRC.NONE,
+      motorRpmValid:false, motorRpm:0,
+      motorTemperatureValid:false, motorTemperatureC:0,
+      assistLevelValid:false, assistLevel:0,
+      batterySocValid:false, batterySocPct:0, batterySocSource:SRC.NONE,
+      batteryVoltageValid:false, batteryVoltageMv:0,
+      batteryCurrentValid:false, batteryCurrentMa:0,
+      batteryTempsValid:[false,false,false,false], batteryTempsC:[0,0,0,0],
+      rearGearValid:false, rearGearIndex:0, rearGearMax:0, rearGearSource:SRC.NONE,
+    }; }
+    processFrame(id, d){
+      const s = this.state, dlc = d.length;
+      switch(id){
+        case ID.GENERAL_INFO00ACK: case ID.GENERAL_INFO00BRO:
+          if(dlc>=6){
+            const sp=u16le(d,0);
+            if(sp!==0xFFFF){ s.bikeSpeedKph=sp*0.01; s.bikeSpeedValid=true; s.bikeSpeedSource=SRC.GENERAL; }
+            else { s.bikeSpeedValid=false; s.bikeSpeedSource=SRC.NONE; }
+            s.cadenceRpm=d[4]; s.cadenceValid=true; s.cadenceSource=SRC.GENERAL;
+            const tq=u16le(d,2);
+            if(tq!==0xFFFF && tq!==0){ s.riderTorqueNm=tq*0.01; s.riderTorqueValid=true; s.riderTorqueSource=SRC.GENERAL; }
+            else { s.riderTorqueValid=false; s.riderTorqueSource=SRC.NONE; }
+          } break;
+        case ID.ASSISTREQ:
+          if(dlc>=2){ const l=d[1]&0x0F;
+            if(l<=5){ s.assistLevel=l; s.assistLevelValid=true; }
+            else if(l===6){ s.assistLevelValid=false; } } break;
+        case ID.GENERAL_INFO01ACK: case ID.GENERAL_INFO01BRO:
+          if(dlc>=5){ if(d[4]!==0xFF && d[4]!==0){ s.batterySocPct=d[4]; s.batterySocValid=true; s.batterySocSource=SRC.GENERAL; }
+            else { s.batterySocValid=false; s.batterySocSource=SRC.NONE; } } break;
+        case ID.CONTROLLER_INFO00ACK: case ID.CONTROLLER_INFO00BRO:
+          if(dlc>=2 && s.bikeSpeedSource!==SRC.GENERAL){ const sp=u16le(d,0);
+            if(sp!==0xFFFF){ s.bikeSpeedKph=sp*0.01; s.bikeSpeedValid=true; s.bikeSpeedSource=SRC.DEVICE; } } break;
+        case ID.CONTROLLER_INFO02ACK: case ID.CONTROLLER_INFO02BRO:
+          if(dlc>=7){ s.motorRpm=u16le(d,4); s.motorRpmValid=true;
+            s.motorTemperatureC=tempC(d[6]); s.motorTemperatureValid=true; } break;
+        case ID.CONTROLLER_INFO03ACK: case ID.CONTROLLER_INFO03BRO:
+          if(dlc>=4 && s.cadenceSource!==SRC.GENERAL){ s.cadenceRpm=d[3]; s.cadenceValid=true; s.cadenceSource=SRC.DEVICE; }
+          if(dlc>=6 && s.riderTorqueSource!==SRC.GENERAL){ s.riderTorqueNm=u16le(d,4)*0.1; s.riderTorqueValid=true; s.riderTorqueSource=SRC.DEVICE; } break;
+        case ID.BAT1_INFO01ACK: case ID.BAT1_INFO01BRO:
+          if(dlc>=7){ s.batteryVoltageMv=u24le(d,0); s.batteryVoltageValid=true;
+            s.batteryCurrentMa=u16le(d,4); s.batteryCurrentValid=true;
+            if(s.batterySocSource!==SRC.GENERAL && d[6]!==0xFF){ s.batterySocPct=d[6]; s.batterySocValid=true; s.batterySocSource=SRC.DEVICE; } } break;
+        case ID.BAT1_INFO06ACK: case ID.BAT1_INFO06BRO:
+          if(dlc>=4){ for(let i=0;i<4;i++){ s.batteryTempsC[i]=tempC(d[i]); s.batteryTempsValid[i]=true; } } break;
+        case ID.REARDERAILLEUR_INFO00ACK: case ID.REARDERAILLEUR_INFO00BRO:
+          if(dlc>=2){ s.rearGearIndex=d[0]; s.rearGearMax=d[1]; s.rearGearValid=true; s.rearGearSource=SRC.DEVICE; } break;
+      }
+    }
+  }
+  function parseRawLine(line){
+    const m = /ID=0x([0-9A-Fa-f]+)\s+DLC=(\d+)\s+DATA=([0-9A-Fa-f ]*)/.exec(line);
+    if(!m) return null;
+    const id = parseInt(m[1],16), dlc = parseInt(m[2],10);
+    const bytes = m[3].trim().split(/\s+/).filter(Boolean).map(h=>parseInt(h,16));
+    return { id, dlc, data: bytes.slice(0,dlc) };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  Web Bluetooth:連線 → 訂閱 notify → 解封包 → 顯示
+  // ───────────────────────────────────────────────────────────────────────
+  const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+  const decoder = new CcpaDecoder();
+  const td = new TextDecoder();
+  let rxBuf = '';
+  let bleDevice = null;
+
+  const btn = document.getElementById('connectBtn');
+  const statusEl = document.getElementById('status');
+  const rawEl = document.getElementById('raw');
+  const set = (id,v) => { document.getElementById(id).textContent = v; };
+  const setStatus = (t,on=false) => { statusEl.textContent=t; statusEl.classList.toggle('on',on); };
+
+  function render(s){
+    if(s.bikeSpeedValid)        set('speed', s.bikeSpeedKph.toFixed(2));
+    if(s.cadenceValid)          set('cadence', s.cadenceRpm);
+    if(s.riderTorqueValid)      set('torque', s.riderTorqueNm.toFixed(2));
+    if(s.motorRpmValid)         set('motor_rpm', s.motorRpm);
+    if(s.motorTemperatureValid) set('motor_temp', s.motorTemperatureC);
+    if(s.assistLevelValid)      set('mode', s.assistLevel);
+    if(s.batterySocValid)       set('soc', s.batterySocPct);
+    if(s.batteryVoltageValid)   set('vmv', (s.batteryVoltageMv/1000).toFixed(2));
+    if(s.batteryCurrentValid)   set('ima', (s.batteryCurrentMa/1000).toFixed(2));
+    if(s.rearGearValid)         set('gear', `${s.rearGearIndex} / ${s.rearGearMax}`);
+    if(s.batteryTempsValid.some(Boolean))
+      set('temps', s.batteryTempsC.map((t,i)=> s.batteryTempsValid[i] ? `${t}°` : '--').join(' / '));
+  }
+  function logRaw(line){
+    rawEl.textContent = (line + '\n' + rawEl.textContent).split('\n').slice(0,15).join('\n');
+  }
+  function handleLine(line){
+    logRaw(line);
+    const f = parseRawLine(line);
+    if(!f) return;
+    decoder.processFrame(f.id, f.data);
+    render(decoder.state);
+  }
+  function onNotify(e){
+    rxBuf += td.decode(e.target.value);
+    let i;
+    while((i = rxBuf.indexOf('\n')) >= 0){
+      const line = rxBuf.slice(0,i).trim();
+      rxBuf = rxBuf.slice(i+1);
+      if(line) handleLine(line);
+    }
+  }
+  function onDisconnected(){
+    setStatus('已斷線,點按鈕重新連線'); btn.disabled = false;
+  }
+
+  async function connect(){
+    if(!navigator.bluetooth){
+      setStatus('這個瀏覽器不支援 Web Bluetooth(iPhone 請用 Bluefy)');
+      return;
+    }
+    try{
+      btn.disabled = true; setStatus('掃描中…請選擇 CCPA-Telemetry');
+      bleDevice = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'CCPA-Telemetry' }],
+        optionalServices: [NUS_SERVICE],
+      });
+      bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+      setStatus('連線中…');
+      const server  = await bleDevice.gatt.connect();
+      const service = await server.getPrimaryService(NUS_SERVICE);
+      const tx      = await service.getCharacteristic(NUS_TX);
+      await tx.startNotifications();
+      tx.addEventListener('characteristicvaluechanged', onNotify);
+      setStatus('已連線,訂閱 notify 中 🎉', true);
+    }catch(err){
+      setStatus('連線失敗:' + err.message); btn.disabled = false;
+    }
+  }
+  btn.addEventListener('click', connect);
+  </script>
+</body>
+</html>
