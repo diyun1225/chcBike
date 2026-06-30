@@ -8,8 +8,14 @@
 <body>
   <h3>CCPA 車況(BLE)</h3>
   <button id="connectBtn">連線</button>
+  <button id="clearBtn">清空封包</button>
   <p id="status">尚未連線</p>
+
+  <h4>解碼後車況</h4>
   <pre id="out">(尚未收到資料)</pre>
+
+  <h4>原始封包(最新在最上面)</h4>
+  <pre id="raw">(尚未收到封包)</pre>
 
   <script src="ccpa_decode.js"></script>
   <script>
@@ -19,6 +25,14 @@
     const dec = new CcpaDecoder();
     const td = new TextDecoder();
     let buf = "";
+
+    // 原始封包記錄:最新在最上面,最多留 200 行避免畫面越來越長。
+    const rawLines = [];
+    function showRaw(line) {
+      rawLines.unshift(line);
+      if (rawLines.length > 200) rawLines.length = 200;
+      document.getElementById("raw").textContent = rawLines.join("\n");
+    }
 
     function show() {
       const s = dec.snapshot();
@@ -42,7 +56,7 @@
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
-        if (line) { dec.feed(line); show(); }
+        if (line) { showRaw(line); dec.feed(line); show(); }
       }
     }
 
@@ -65,6 +79,10 @@
       }
     }
     document.getElementById("connectBtn").addEventListener("click", connect);
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      rawLines.length = 0;
+      document.getElementById("raw").textContent = "(尚未收到封包)";
+    });
   </script>
 </body>
 </html>
