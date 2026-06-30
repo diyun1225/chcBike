@@ -8,11 +8,14 @@
 <body>
   <h3>CCPA 車況(BLE)</h3>
   <button id="connectBtn">連線</button>
-  <button id="clearBtn">清空封包</button>
+  <button id="clearBtn">清空</button>
   <p id="status">尚未連線</p>
 
   <h4>解碼後車況</h4>
   <pre id="out">(尚未收到資料)</pre>
+
+  <h4>診斷 Log(從上到下看卡在哪一步)</h4>
+  <pre id="log" style="background:#f4f4f4;padding:8px;max-height:260px;overflow:auto">(尚未開始)</pre>
 
   <h4>原始封包(最新在最上面)</h4>
   <pre id="raw">(尚未收到封包)</pre>
@@ -25,8 +28,18 @@
     const dec = new CcpaDecoder();
     const td = new TextDecoder();
     let buf = "";
+    let notifyCount = 0;
 
-    // 原始封包記錄:最新在最上面,最多留 200 行避免畫面越來越長。
+    // ── 診斷 log:每個節點都記一筆,最新在最上面 ──────────────────────────
+    const logLines = [];
+    function log(msg) {
+      const t = new Date().toLocaleTimeString();
+      logLines.unshift(`[${t}] ${msg}`);
+      if (logLines.length > 300) logLines.length = 300;
+      document.getElementById("log").textContent = logLines.join("\n");
+    }
+
+    // ── 原始封包記錄 ────────────────────────────────────────────────────
     const rawLines = [];
     function showRaw(line) {
       rawLines.unshift(line);
@@ -34,6 +47,7 @@
       document.getElementById("raw").textContent = rawLines.join("\n");
     }
 
+    // ── 解碼後顯示 ──────────────────────────────────────────────────────
     function show() {
       const s = dec.snapshot();
       document.getElementById("out").textContent =
@@ -50,38 +64,72 @@
         "後檔位   : " + (s.rearGear ? s.rearGear.index + "/" + s.rearGear.max : "--");
     }
 
+    // ── 節點 ⑦⑧:收到 BLE → 切行 → 解析 → 解碼 ──────────────────────────
     function onNotify(e) {
-      buf += td.decode(e.target.value);
+      const bytes = e.target.value;            // DataView
+      const text = td.decode(bytes);
+      notifyCount++;
+      log(`⑦ 收到 BLE #${notifyCount}(${bytes.byteLength} bytes): ${JSON.stringify(text)}`);
+
+      buf += text;
       let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
-        if (line) { showRaw(line); dec.feed(line); show(); }
+        if (!line) continue;
+        showRaw(line);
+
+        const f = CcpaDecoder.parseRawLine(line);
+        if (!f) { log(`⑧ ✗ 解析失敗(格式不符):${JSON.stringify(line)}`); continue; }
+        log(`⑧ 解析 OK:id=0x${f.id.toString(16).toUpperCase()} dlc=${f.dlc} data=[${f.data.map(b => b.toString(16).padStart(2, "0")).join(" ")}]`);
+
+        dec.feed(line);   // 解封包
+        show();           // 更新「解碼後車況」
       }
     }
 
+    // ── 節點 ①~⑥:連線過程 ──────────────────────────────────────────────
     async function connect() {
       const st = document.getElementById("status");
-      if (!navigator.bluetooth) { st.textContent = "此瀏覽器不支援藍牙(iPhone 請用 Bluefy)"; return; }
+      if (!navigator.bluetooth) {
+        st.textContent = "此瀏覽器不支援藍牙(iPhone 請用 Bluefy)";
+        log("✗ 此瀏覽器沒有 Web Bluetooth");
+        return;
+      }
       try {
-        st.textContent = "掃描中…請選 CCPA-Telemetry";
+        log("① 開始掃描…請在彈窗選 CCPA-Telemetry");
+        st.textContent = "掃描中…";
         const dev = await navigator.bluetooth.requestDevice({
           filters: [{ name: "CCPA-Telemetry" }], optionalServices: [SERVICE],
         });
-        dev.addEventListener("gattserverdisconnected", () => st.textContent = "已斷線");
-        const srv = await (await dev.gatt.connect()).getPrimaryService(SERVICE);
+        log(`② 已選裝置:${dev.name || dev.id}`);
+        dev.addEventListener("gattserverdisconnected", () => {
+          st.textContent = "已斷線"; log("✗ 裝置斷線");
+        });
+
+        log("③ 連線 GATT…");
+        const server = await dev.gatt.connect();
+        log("④ 取得服務(0000cc01…)");
+        const srv = await server.getPrimaryService(SERVICE);
+        log("⑤ 取得 TX 特徵(0000cc03…)");
         const tx = await srv.getCharacteristic(TX);
+        log("⑥ 開啟 notify…");
         await tx.startNotifications();
         tx.addEventListener("characteristicvaluechanged", onNotify);
+
         st.textContent = "已連線";
+        log("✅ 訂閱成功!等板子送資料。若這之後一直沒『⑦』= 板子沒在送 = 沒收到 CAN(硬體那側)");
       } catch (err) {
         st.textContent = "連線失敗:" + err.message;
+        log("✗ 連線失敗:" + err.message);
       }
     }
+
     document.getElementById("connectBtn").addEventListener("click", connect);
     document.getElementById("clearBtn").addEventListener("click", () => {
-      rawLines.length = 0;
+      rawLines.length = 0; logLines.length = 0; notifyCount = 0;
       document.getElementById("raw").textContent = "(尚未收到封包)";
+      document.getElementById("log").textContent = "(已清空)";
     });
   </script>
 </body>
