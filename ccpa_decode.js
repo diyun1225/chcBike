@@ -83,6 +83,10 @@
             const tq = u16le(d, 2);
             if (tq !== 0xFFFF && tq !== 0x0000) { s.riderTorqueNm = tq * 0.01; s.riderTorqueValid = true; s.riderTorqueSource = SRC.GENERAL; }
             else { s.riderTorqueValid = false; s.riderTorqueSource = SRC.NONE; }
+            // 助力等級在 byte5 的 bit2~5(0~5 有效,6=NULL)。這包定時廣播,所以這裡讀得到。
+            const lvl = (d[5] >> 2) & 0x0F;
+            if (lvl <= 5) { s.assistLevel = lvl; s.assistLevelValid = true; }
+            else { s.assistLevelValid = false; }
           }
           break;
 
