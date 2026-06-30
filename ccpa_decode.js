@@ -180,6 +180,7 @@
     }
   }
 
+  // 同時支援:純 <script>(全域)、Node/CommonJS(require)。
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { CcpaDecoder };
   }
