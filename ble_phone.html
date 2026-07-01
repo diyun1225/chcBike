@@ -15,6 +15,15 @@
   <button id="shiftUpBtn" disabled>升檔 ▲</button>
   <button id="shiftDownBtn" disabled>降檔 ▼</button>
 
+  <p>助力段位:
+    <button class="assistBtn" data-level="0" disabled>0 off</button>
+    <button class="assistBtn" data-level="1" disabled>1 eco</button>
+    <button class="assistBtn" data-level="2" disabled>2 eco+</button>
+    <button class="assistBtn" data-level="3" disabled>3 normal</button>
+    <button class="assistBtn" data-level="4" disabled>4 sport</button>
+    <button class="assistBtn" data-level="5" disabled>5 sport+</button>
+  </p>
+
   <h4>解碼後車況</h4>
   <pre id="out">(尚未收到資料)</pre>
 
@@ -113,8 +122,7 @@
         dev.addEventListener("gattserverdisconnected", () => {
           st.textContent = "已斷線"; log("✗ 裝置斷線");
           rxChar = null;
-          document.getElementById("shiftUpBtn").disabled = true;
-          document.getElementById("shiftDownBtn").disabled = true;
+          setControlsEnabled(false);
         });
 
         log("③ 連線 GATT…");
@@ -129,8 +137,7 @@
 
         // 取得 RX 特徵(0000cc02…)以送控制指令,並開放控制按鈕
         rxChar = await srv.getCharacteristic(RX);
-        document.getElementById("shiftUpBtn").disabled = false;
-        document.getElementById("shiftDownBtn").disabled = false;
+        setControlsEnabled(true);
         log("⑥b 取得 RX 特徵(0000cc02…)→ 控制按鈕已開放");
 
         st.textContent = "已連線";
@@ -156,8 +163,20 @@
       }
     }
 
+    // 開放/鎖定所有控制按鈕(升降檔 + 助力段位),連線時一起切換
+    function setControlsEnabled(on) {
+      document.getElementById("shiftUpBtn").disabled = !on;
+      document.getElementById("shiftDownBtn").disabled = !on;
+      document.querySelectorAll(".assistBtn").forEach(b => { b.disabled = !on; });
+    }
+
     document.getElementById("shiftUpBtn").addEventListener("click", () => sendCmd("SHIFT,UP"));
     document.getElementById("shiftDownBtn").addEventListener("click", () => sendCmd("SHIFT,DOWN"));
+
+    // 助力段位:按下 → 送 "ASSIST,<level>"(韌體 control_set_assist_level 收 0~5)
+    document.querySelectorAll(".assistBtn").forEach(btn => {
+      btn.addEventListener("click", () => sendCmd("ASSIST," + btn.dataset.level));
+    });
 
     document.getElementById("connectBtn").addEventListener("click", connect);
     document.getElementById("clearBtn").addEventListener("click", () => {
