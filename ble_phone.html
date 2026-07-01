@@ -11,6 +11,10 @@
   <button id="clearBtn">清空</button>
   <p id="status">尚未連線</p>
 
+  <h4>控制</h4>
+  <button id="shiftUpBtn" disabled>升檔 ▲</button>
+  <button id="shiftDownBtn" disabled>降檔 ▼</button>
+
   <h4>解碼後車況</h4>
   <pre id="out">(尚未收到資料)</pre>
 
@@ -24,6 +28,9 @@
   <script>
     const SERVICE = "0000cc01-c3d5-40b4-ab51-611746a316f3";
     const TX      = "0000cc03-c3d5-40b4-ab51-611746a316f3";
+    const RX      = "0000cc02-c3d5-40b4-ab51-611746a316f3"; // host -> esp(write)控制指令
+
+    let rxChar = null; // 連線後拿到,用來送控制指令(SHIFT,UP / SHIFT,DOWN …)
 
     const dec = new CcpaDecoder();
     const td = new TextDecoder();
@@ -105,6 +112,9 @@
         log(`② 已選裝置:${dev.name || dev.id}`);
         dev.addEventListener("gattserverdisconnected", () => {
           st.textContent = "已斷線"; log("✗ 裝置斷線");
+          rxChar = null;
+          document.getElementById("shiftUpBtn").disabled = true;
+          document.getElementById("shiftDownBtn").disabled = true;
         });
 
         log("③ 連線 GATT…");
@@ -117,6 +127,12 @@
         await tx.startNotifications();
         tx.addEventListener("characteristicvaluechanged", onNotify);
 
+        // 取得 RX 特徵(0000cc02…)以送控制指令,並開放控制按鈕
+        rxChar = await srv.getCharacteristic(RX);
+        document.getElementById("shiftUpBtn").disabled = false;
+        document.getElementById("shiftDownBtn").disabled = false;
+        log("⑥b 取得 RX 特徵(0000cc02…)→ 控制按鈕已開放");
+
         st.textContent = "已連線";
         log("✅ 訂閱成功!等板子送資料。若這之後一直沒『⑦』= 板子沒在送 = 沒收到 CAN(硬體那側)");
       } catch (err) {
@@ -124,6 +140,24 @@
         log("✗ 連線失敗:" + err.message);
       }
     }
+
+    // ── 送控制指令(寫入 RX 特徵 CC02)────────────────────────────────────
+    const enc = new TextEncoder();
+    async function sendCmd(cmd) {
+      if (!rxChar) { log("✗ 尚未連線,無法送指令"); return; }
+      try {
+        const bytes = enc.encode(cmd + "\n");
+        // 韌體 RX 支援 Write / Write-No-Response;優先用免回應(較快)
+        if (rxChar.writeValueWithoutResponse) await rxChar.writeValueWithoutResponse(bytes);
+        else await rxChar.writeValue(bytes);
+        log(`→ 已送指令:${cmd}`);
+      } catch (err) {
+        log("✗ 送指令失敗:" + err.message);
+      }
+    }
+
+    document.getElementById("shiftUpBtn").addEventListener("click", () => sendCmd("SHIFT,UP"));
+    document.getElementById("shiftDownBtn").addEventListener("click", () => sendCmd("SHIFT,DOWN"));
 
     document.getElementById("connectBtn").addEventListener("click", connect);
     document.getElementById("clearBtn").addEventListener("click", () => {
