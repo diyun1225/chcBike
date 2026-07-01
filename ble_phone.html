@@ -24,6 +24,17 @@
     <button class="assistBtn" data-level="5" disabled>5 sport+</button>
   </p>
 
+  <p>原始指令(組員輸出的字串直接貼這裡送):
+    <input id="rawCmdInput" type="text" placeholder="例:CAN,2940015,2,02,03" size="32" disabled />
+    <button id="rawCmdBtn" disabled>送出</button>
+  </p>
+
+  <h4>資料記錄(CSV)</h4>
+  <button id="recBtn" disabled>⏺ 開始記錄</button>
+  <button id="dlBtn" disabled>⬇ 下載 CSV</button>
+  <button id="copyBtn" disabled>📋 複製</button>
+  <span id="recInfo">未記錄</span>
+
   <h4>解碼後車況</h4>
   <pre id="out">(尚未收到資料)</pre>
 
@@ -132,6 +143,7 @@
         dev.addEventListener("gattserverdisconnected", () => {
           st.textContent = "已斷線"; log("✗ 裝置斷線");
           rxChar = null;
+          if (recording) toggleRec(); // 斷線自動停記錄(資料保留,可下載)
           setControlsEnabled(false);
         });
 
@@ -178,7 +190,102 @@
       document.getElementById("shiftUpBtn").disabled = !on;
       document.getElementById("shiftDownBtn").disabled = !on;
       document.querySelectorAll(".assistBtn").forEach(b => { b.disabled = !on; });
+      document.getElementById("rawCmdInput").disabled = !on;
+      document.getElementById("rawCmdBtn").disabled = !on;
+      document.getElementById("recBtn").disabled = !on;
     }
+
+    // 原始指令:把輸入框內容(例 "CAN,2940015,2,02,03")原封不動寫進 RX 送出。
+    function sendRawCmd() {
+      const cmd = document.getElementById("rawCmdInput").value.trim();
+      if (!cmd) { log("✗ 原始指令是空的"); return; }
+      sendCmd(cmd);
+    }
+
+    // ── 資料記錄:固定 5Hz 取樣目前解碼快照 → 存陣列 → 匯出 CSV ────────────
+    const REC_HZ = 5;                 // 每秒取樣筆數(0.2 秒一筆)
+    let recording = false;
+    let recTimer = null;
+    let recStart = 0;
+    let wakeLock = null;              // 記錄時防止螢幕休眠(不然計時器會被系統凍住)
+    const recRows = [];
+
+    function recSample() {
+      const now = new Date();
+      recRows.push({ iso: now.toISOString(), t: Date.now() - recStart,
+                     s: dec.snapshot(), aset: commandedAssist });
+      updateRecInfo();
+    }
+
+    function updateRecInfo() {
+      document.getElementById("recInfo").textContent =
+        (recording ? "● 記錄中… " : "已停止 ") + recRows.length + " 筆";
+      document.getElementById("dlBtn").disabled = recRows.length === 0;
+      document.getElementById("copyBtn").disabled = recRows.length === 0;
+    }
+
+    async function toggleRec() {
+      recording = !recording;
+      const btn = document.getElementById("recBtn");
+      if (recording) {
+        recRows.length = 0;                    // 每次開始 = 全新一段
+        recStart = Date.now();
+        recTimer = setInterval(recSample, Math.round(1000 / REC_HZ));
+        btn.textContent = "⏹ 停止記錄";
+        try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+        log("⏺ 開始記錄(" + REC_HZ + " Hz)");
+      } else {
+        clearInterval(recTimer); recTimer = null;
+        try { if (wakeLock) await wakeLock.release(); } catch (e) {}
+        wakeLock = null;
+        btn.textContent = "⏺ 開始記錄";
+        log("⏹ 停止記錄,共 " + recRows.length + " 筆");
+      }
+      updateRecInfo();
+    }
+
+    function buildCsv() {
+      const head = ["time_iso", "t_ms", "speed_kph", "cadence_rpm", "torque_nm",
+        "motor_rpm", "motor_temp_c", "assist_report", "assist_set", "soc_pct",
+        "voltage_mv", "current_ma", "bat_t0", "bat_t1", "bat_t2", "bat_t3",
+        "gear_index", "gear_max"];
+      const v = x => (x === null || x === undefined) ? "" : x;
+      const rows = [head.join(",")];
+      for (const r of recRows) {
+        const s = r.s, t = s.batteryTempsC || [];
+        rows.push([r.iso, r.t, v(s.speedKph), v(s.cadenceRpm), v(s.torqueNm),
+          v(s.motorRpm), v(s.motorTempC), v(s.assistLevel), v(r.aset), v(s.batterySocPct),
+          v(s.batteryVoltageMv), v(s.batteryCurrentMa), v(t[0]), v(t[1]), v(t[2]), v(t[3]),
+          s.rearGear ? s.rearGear.index : "", s.rearGear ? s.rearGear.max : ""].join(","));
+      }
+      return rows.join("\n");
+    }
+
+    function tsName() {
+      const d = new Date(), p = n => String(n).padStart(2, "0");
+      return `ccpa_ride_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+             `_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.csv`;
+    }
+
+    function downloadCsv() {
+      const csv = "﻿" + buildCsv();  // BOM:Excel 開中文才不亂碼
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = tsName();
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      log("⬇ 已匯出 " + recRows.length + " 筆 → " + a.download);
+    }
+
+    async function copyCsv() {
+      try { await navigator.clipboard.writeText(buildCsv()); log("📋 已複製 CSV(可貼到記事本/Excel)"); }
+      catch (e) { log("✗ 複製失敗(iPhone 可能不支援,改用下載):" + e.message); }
+    }
+
+    document.getElementById("recBtn").addEventListener("click", toggleRec);
+    document.getElementById("dlBtn").addEventListener("click", downloadCsv);
+    document.getElementById("copyBtn").addEventListener("click", copyCsv);
 
     document.getElementById("shiftUpBtn").addEventListener("click", () => sendCmd("SHIFT,UP"));
     document.getElementById("shiftDownBtn").addEventListener("click", () => sendCmd("SHIFT,DOWN"));
@@ -190,6 +297,12 @@
         sendCmd("ASSIST," + btn.dataset.level);
         show(); // 馬上更新畫面(不用等下一包)
       });
+    });
+
+    // 原始指令:按「送出」或在輸入框按 Enter 都送
+    document.getElementById("rawCmdBtn").addEventListener("click", sendRawCmd);
+    document.getElementById("rawCmdInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendRawCmd();
     });
 
     document.getElementById("connectBtn").addEventListener("click", connect);
