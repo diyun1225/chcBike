@@ -40,6 +40,7 @@
     const RX      = "0000cc02-c3d5-40b4-ab51-611746a316f3"; // host -> esp(write)控制指令
 
     let rxChar = null; // 連線後拿到,用來送控制指令(SHIFT,UP / SHIFT,DOWN …)
+    let commandedAssist = null; // 我們最後一次按的助力段位(這台車不回報段位,用它當畫面回饋)
 
     const dec = new CcpaDecoder();
     const td = new TextDecoder();
@@ -63,6 +64,14 @@
       document.getElementById("raw").textContent = rawLines.join("\n");
     }
 
+    // 助力段位數值 → 模式名稱(對照韌體 assistModeName / PROTOCOL.md)
+    const ASSIST_NAMES = ["off", "eco", "eco+", "normal", "sport", "sport+"];
+    function assistText(lvl) {
+      if (lvl == null) return "--";                 // 無效/尚未收到
+      const name = ASSIST_NAMES[lvl];
+      return name ? `${lvl} (${name})` : String(lvl);
+    }
+
     // ── 解碼後顯示 ──────────────────────────────────────────────────────
     function show() {
       const s = dec.snapshot();
@@ -72,7 +81,8 @@
         "扭力     : " + (s.torqueNm         ?? "--") + " Nm\n" +
         "馬達轉速 : " + (s.motorRpm         ?? "--") + " rpm\n" +
         "馬達溫度 : " + (s.motorTempC       ?? "--") + " C\n" +
-        "助力模式 : " + (s.assistLevel      ?? "--") + "\n" +
+        "助力段位 : " + assistText(s.assistLevel) +
+                        (commandedAssist !== null ? "  (你設定:" + assistText(commandedAssist) + ")" : "") + "\n" +
         "電量     : " + (s.batterySocPct    ?? "--") + " %\n" +
         "電壓     : " + (s.batteryVoltageMv ?? "--") + " mV\n" +
         "電流     : " + (s.batteryCurrentMa ?? "--") + " mA\n" +
@@ -175,7 +185,11 @@
 
     // 助力段位:按下 → 送 "ASSIST,<level>"(韌體 control_set_assist_level 收 0~5)
     document.querySelectorAll(".assistBtn").forEach(btn => {
-      btn.addEventListener("click", () => sendCmd("ASSIST," + btn.dataset.level));
+      btn.addEventListener("click", () => {
+        commandedAssist = parseInt(btn.dataset.level, 10); // 記住設定值,顯示在畫面上當回饋
+        sendCmd("ASSIST," + btn.dataset.level);
+        show(); // 馬上更新畫面(不用等下一包)
+      });
     });
 
     document.getElementById("connectBtn").addEventListener("click", connect);
