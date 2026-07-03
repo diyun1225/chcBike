@@ -137,7 +137,7 @@
         log("① 開始掃描…請在彈窗選 CCPA-Telemetry");
         st.textContent = "掃描中…";
         const dev = await navigator.bluetooth.requestDevice({
-          filters: [{ name: "CCPA-Telemetry" }], optionalServices: [SERVICE],
+          filters: [{ namePrefix: "CCPA-Telemetry" }], optionalServices: [SERVICE],
         });
         log(`② 已選裝置:${dev.name || dev.id}`);
         dev.addEventListener("gattserverdisconnected", () => {
