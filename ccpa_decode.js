@@ -77,8 +77,12 @@
         case ID.GENERAL_INFO00BRO:
           if (dlc >= 6) {
             const sp = u16le(d, 0);
-            if (sp !== 0xFFFF) { s.bikeSpeedKph = sp * 0.01; s.bikeSpeedValid = true; s.bikeSpeedSource = SRC.GENERAL; }
-            else { s.bikeSpeedValid = false; s.bikeSpeedSource = SRC.NONE; }
+            // 實測:這台車 GENERAL_INFO00 的車速欄(byte0-1)永遠是 0,不是真的停。
+            // 把 0 視同「這包沒車速」→ 不鎖定,讓 CONTROLLER_INFO00(0x1E942042)的真車速接手
+            // (撥輪子時它的 byte0-1 會跳非零)。等同下面扭力那行已有的 !==0x0000 處理。
+            if (sp !== 0xFFFF && sp !== 0x0000) { s.bikeSpeedKph = sp * 0.01; s.bikeSpeedValid = true; s.bikeSpeedSource = SRC.GENERAL; }
+            else if (sp === 0xFFFF) { s.bikeSpeedValid = false; s.bikeSpeedSource = SRC.NONE; }
+            else { s.bikeSpeedSource = SRC.NONE; } // 0:不鎖定,交給 CONTROLLER_INFO00
             s.cadenceRpm = d[4]; s.cadenceValid = true; s.cadenceSource = SRC.GENERAL;
             const tq = u16le(d, 2);
             if (tq !== 0xFFFF && tq !== 0x0000) { s.riderTorqueNm = tq * 0.01; s.riderTorqueValid = true; s.riderTorqueSource = SRC.GENERAL; }
@@ -118,7 +122,9 @@
         case ID.CONTROLLER_INFO02BRO:
           if (dlc >= 7) {
             s.motorRpm = u16le(d, 4); s.motorRpmValid = true;
-            s.motorTemperatureC = tempC(d[6]); s.motorTemperatureValid = true;
+            // 實測這台車馬達溫度 byte(d[6])永遠是 0(死欄位),tempC(0)=-64 是假值 → 當沒資料。
+            if (d[6] !== 0) { s.motorTemperatureC = tempC(d[6]); s.motorTemperatureValid = true; }
+            else { s.motorTemperatureValid = false; }
           }
           break;
 
