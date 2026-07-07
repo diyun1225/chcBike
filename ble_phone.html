@@ -24,6 +24,12 @@
     <button class="assistBtn" data-level="5" disabled>5 sport+</button>
   </p>
 
+  <p>自訂協議(Phone/IoT/AI)測試:
+    <button id="modeTxBtn" disabled>切傳送模式</button>
+    <button id="modeRxBtn" disabled>切回傳模式</button>
+    <span id="modeAck">(等組員回 OK)</span>
+  </p>
+
   <p>原始指令(組員輸出的字串直接貼這裡送):
     <input id="rawCmdInput" type="text" placeholder="例:CAN,2940015,2,02,03" size="32" disabled />
     <button id="rawCmdBtn" disabled>送出</button>
@@ -120,6 +126,15 @@
         if (!f) { log(`⑧ ✗ 解析失敗(格式不符):${JSON.stringify(line)}`); continue; }
         log(`⑧ 解析 OK:id=0x${f.id.toString(16).toUpperCase()} dlc=${f.dlc} data=[${f.data.map(b => b.toString(16).padStart(2, "0")).join(" ")}]`);
 
+        // 自訂協議:組員回的 OK(0x1FA2000X DATA=AA)→ 更新畫面
+        if ((f.id === 0x1FA20001 || f.id === 0x1FA20002) && f.data[0] === 0xAA) {
+          const nm = f.id === 0x1FA20001 ? "傳送模式" : "回傳模式";
+          const t = new Date().toLocaleTimeString();
+          document.getElementById("modeAck").textContent = `✓ 組員回 OK:${nm} @${t}`;
+          log(`✓ 組員回 OK:${nm}`);
+          continue;   // 不是 CCPA 車況,不用進解碼器
+        }
+
         dec.feed(line);   // 解封包
         show();           // 更新「解碼後車況」
       }
@@ -192,6 +207,8 @@
       document.querySelectorAll(".assistBtn").forEach(b => { b.disabled = !on; });
       document.getElementById("rawCmdInput").disabled = !on;
       document.getElementById("rawCmdBtn").disabled = !on;
+      document.getElementById("modeTxBtn").disabled = !on;
+      document.getElementById("modeRxBtn").disabled = !on;
       document.getElementById("recBtn").disabled = !on;
     }
 
@@ -289,6 +306,16 @@
 
     document.getElementById("shiftUpBtn").addEventListener("click", () => sendCmd("SHIFT,UP"));
     document.getElementById("shiftDownBtn").addEventListener("click", () => sendCmd("SHIFT,DOWN"));
+
+    // 自訂協議:切模式(送 CAN,<id>,0 → 韌體轉發到 CAN → AI 板回 OK)
+    document.getElementById("modeTxBtn").addEventListener("click", () => {
+      document.getElementById("modeAck").textContent = "(等組員回 OK…)";
+      sendCmd("CAN,1FA10001,0");
+    });
+    document.getElementById("modeRxBtn").addEventListener("click", () => {
+      document.getElementById("modeAck").textContent = "(等組員回 OK…)";
+      sendCmd("CAN,1FA10002,0");
+    });
 
     // 助力段位:按下 → 送 "ASSIST,<level>"(韌體 control_set_assist_level 收 0~5)
     document.querySelectorAll(".assistBtn").forEach(btn => {
