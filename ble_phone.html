@@ -7,9 +7,11 @@
 </head>
 <body>
   <h3>CCPA 車況(BLE)</h3>
-  <button id="connectBtn">連線</button>
+  <button id="connectBtn">連線 單車</button>
+  <button id="connectAiBtn">連線毫米波板</button>
   <button id="clearBtn">清空</button>
-  <p id="status">尚未連線</p>
+  <p id="status">單車:尚未連線</p>
+  <p id="aiStatus">毫米波板:尚未連線</p>
 
   <h4>控制</h4>
   <button id="shiftUpBtn" disabled>升檔 ▲</button>
@@ -191,6 +193,72 @@
 
         dec.feed(line);   // 解封包
         show();           // 更新「解碼後車況」
+      }
+    }
+
+    // ── AI 板(架構B:第二台 BLE)收到 JSON → 切行 → 解 HR/RR/FI ───────────
+    // 用獨立的行緩衝 bufAi,跟單車的 buf 分開,兩台的碎片才不會互相污染。
+    let bufAi = "";
+    let aiNotifyCount = 0;
+    function onNotifyAi(e) {
+      const text = td.decode(e.target.value);
+      aiNotifyCount++;
+      log(`⑦[AI] 收到 BLE #${aiNotifyCount}(${e.target.value.byteLength} bytes): ${JSON.stringify(text)}`);
+      bufAi += text;
+      let i;
+      while ((i = bufAi.indexOf("\n")) >= 0) {
+        const line = bufAi.slice(0, i).trim();
+        bufAi = bufAi.slice(i + 1);
+        if (!line) continue;
+        if (line.startsWith("{")) {
+          try {
+            const obj = JSON.parse(line);
+            updateVitals(obj);
+            log("♥ 生理量測(AI板):" + JSON.stringify(obj));
+            show();
+          } catch (e2) {
+            // 不是完整 JSON(被 BLE 切斷)→ 留著等下一段拼回來
+          }
+        }
+      }
+    }
+
+    // ── 連線 AI 板(你同學那台,UUID 跟單車相同)──────────────────────────
+    let aiChar = null;
+    async function connectAi() {
+      const st = document.getElementById("aiStatus");
+      if (!navigator.bluetooth) {
+        st.textContent = "AI 板:此瀏覽器不支援藍牙(iPhone 請用 Bluefy)";
+        log("✗ [AI] 此瀏覽器沒有 Web Bluetooth");
+        return;
+      }
+      try {
+        // 不知道同學那台叫什麼名字,所以列出全部藍牙裝置讓你自己選(optionalServices 要帶
+        // SERVICE 才能在連上後存取同一組 UUID 的服務)。你同學那台的 UUID 要跟這裡相同。
+        log("①[AI] 開始掃描…請在彈窗選你同學的 AI 板");
+        st.textContent = "AI 板:掃描中…";
+        const dev = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true, optionalServices: [SERVICE],
+        });
+        log(`②[AI] 已選裝置:${dev.name || dev.id}`);
+        dev.addEventListener("gattserverdisconnected", () => {
+          st.textContent = "AI 板:已斷線"; log("✗ [AI] 裝置斷線"); aiChar = null;
+        });
+        log("③[AI] 連線 GATT…");
+        const server = await dev.gatt.connect();
+        log("④[AI] 取得服務(0000cc01…)");
+        const srv = await server.getPrimaryService(SERVICE);
+        log("⑤[AI] 取得 TX 特徵(0000cc03…)");
+        const tx = await srv.getCharacteristic(TX);
+        log("⑥[AI] 開啟 notify…");
+        await tx.startNotifications();
+        tx.addEventListener("characteristicvaluechanged", onNotifyAi);
+        aiChar = tx;
+        st.textContent = "AI 板:已連線";
+        log("✅[AI] 訂閱成功!等 AI 板送 JSON 生理資料。若一直沒『⑦[AI]』= AI 板沒在送。");
+      } catch (err) {
+        st.textContent = "AI 板:連線失敗:" + err.message;
+        log("✗ [AI] 連線失敗:" + err.message);
       }
     }
 
@@ -388,6 +456,7 @@
     });
 
     document.getElementById("connectBtn").addEventListener("click", connect);
+    document.getElementById("connectAiBtn").addEventListener("click", connectAi);
     document.getElementById("clearBtn").addEventListener("click", () => {
       rawLines.length = 0; logLines.length = 0; notifyCount = 0;
       document.getElementById("raw").textContent = "(尚未收到封包)";
