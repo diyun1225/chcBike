@@ -63,6 +63,8 @@
     const td = new TextDecoder();
     let buf = "";
     let notifyCount = 0;
+    let fragDropped = 0;   // 被 BLE 切斷、拼不回整行的碎片數(MTU 小+送太密造成,非資料遺失)
+    let lastFragLog = 0;
 
     // ── 診斷 log:每個節點都記一筆,最新在最上面 ──────────────────────────
     const logLines = [];
@@ -89,6 +91,24 @@
       return name ? `${lvl} (${name})` : String(lvl);
     }
 
+    // ── AI 板生理量測(心率 HR / 呼吸率 RR / FI)────────────────────────
+    // 走同一個 TX 特徵(UUID 相同),但送的是純 JSON 一行(不是 ID= 的 CAN 封包),例:
+    //   {"hr":72,"rr":16,"fi":0.83}
+    // 欄位名大小寫都接受;這包沒帶到的欄位就保留上一次的值。
+    const vitals = { hr: null, rr: null, fi: null };
+    function updateVitals(obj) {
+      const pick = (key) => {
+        for (const k of Object.keys(obj)) {
+          if (k.toLowerCase() === key) { const n = Number(obj[k]); return Number.isFinite(n) ? n : null; }
+        }
+        return undefined;                    // undefined = 這包根本沒帶這欄(保留舊值)
+      };
+      const hr = pick("hr"), rr = pick("rr"), fi = pick("fi");
+      if (hr !== undefined) vitals.hr = hr;
+      if (rr !== undefined) vitals.rr = rr;
+      if (fi !== undefined) vitals.fi = fi;
+    }
+
     // ── 解碼後顯示 ──────────────────────────────────────────────────────
     function show() {
       const s = dec.snapshot();
@@ -104,7 +124,10 @@
         "電壓     : " + (s.batteryVoltageMv ?? "--") + " mV\n" +
         "電流     : " + (s.batteryCurrentMa ?? "--") + " mA\n" +
         "電池溫度 : " + s.batteryTempsC.map(x => x ?? "--").join(", ") + " C\n" +
-        "後檔位   : " + (s.rearGear ? s.rearGear.index + "/" + s.rearGear.max : "--");
+        "後檔位   : " + (s.rearGear ? s.rearGear.index + "/" + s.rearGear.max : "--") + "\n" +
+        "心率 HR  : " + (vitals.hr ?? "--") + " bpm\n" +
+        "呼吸率 RR: " + (vitals.rr ?? "--") + " brpm\n" +
+        "FI       : " + (vitals.fi ?? "--");
     }
 
     // ── 節點 ⑦⑧:收到 BLE → 切行 → 解析 → 解碼 ──────────────────────────
@@ -120,10 +143,41 @@
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
         if (!line) continue;
+
+        // 韌體狀態訊息(# 開頭,例:# CMD ... -> sent)→ 當訊息看,不當封包解析
+        if (line.startsWith("#")) { log("ℹ " + line); continue; }
+
+        // AI 板生理量測是純 JSON 一行({ 開頭),不是 ID= 的 CAN 封包 → 解 JSON 取 HR/RR/FI
+        if (line.startsWith("{")) {
+          try {
+            const obj = JSON.parse(line);
+            updateVitals(obj);
+            log("♥ 生理量測:" + JSON.stringify(obj));
+            show();
+            continue;
+          } catch (e) {
+            // 不是完整 JSON(可能被 BLE 切斷)→ 往下當碎片處理
+          }
+        }
+
+        // 只有 "ID=" 開頭才是完整封包。其餘是被 BLE 切斷、拼不回整行的碎片
+        // (這支手機 MTU 只有 17 bytes + 韌體送太密 → 偶爾漏接中間小包)。
+        // 安靜丟掉、不洗版;碎片≠資料遺失,完整那行照樣解得出來。每 2 秒才回報一次累計數。
+        if (!line.startsWith("ID=")) {
+          fragDropped++;
+          const now = Date.now();
+          if (now - lastFragLog > 2000) { lastFragLog = now; log(`(略過 BLE 碎片,累計 ${fragDropped})`); }
+          continue;
+        }
         showRaw(line);
 
         const f = CcpaDecoder.parseRawLine(line);
-        if (!f) { log(`⑧ ✗ 解析失敗(格式不符):${JSON.stringify(line)}`); continue; }
+        if (!f) {
+          fragDropped++;
+          const now = Date.now();
+          if (now - lastFragLog > 2000) { lastFragLog = now; log(`(略過 BLE 碎片,累計 ${fragDropped})`); }
+          continue;
+        }
         log(`⑧ 解析 OK:id=0x${f.id.toString(16).toUpperCase()} dlc=${f.dlc} data=[${f.data.map(b => b.toString(16).padStart(2, "0")).join(" ")}]`);
 
         // 自訂協議:組員回的 OK(0x1FA2000X DATA=AA)→ 更新畫面
@@ -230,7 +284,7 @@
     function recSample() {
       const now = new Date();
       recRows.push({ iso: now.toISOString(), t: Date.now() - recStart,
-                     s: dec.snapshot(), aset: commandedAssist });
+                     s: dec.snapshot(), aset: commandedAssist, vit: { ...vitals } });
       updateRecInfo();
     }
 
@@ -265,15 +319,16 @@
       const head = ["time_iso", "t_ms", "speed_kph", "cadence_rpm", "torque_nm",
         "motor_rpm", "motor_temp_c", "assist_report", "assist_set", "soc_pct",
         "voltage_mv", "current_ma", "bat_t0", "bat_t1", "bat_t2", "bat_t3",
-        "gear_index", "gear_max"];
+        "gear_index", "gear_max", "hr_bpm", "rr_brpm", "fi"];
       const v = x => (x === null || x === undefined) ? "" : x;
       const rows = [head.join(",")];
       for (const r of recRows) {
-        const s = r.s, t = s.batteryTempsC || [];
+        const s = r.s, t = s.batteryTempsC || [], vt = r.vit || {};
         rows.push([r.iso, r.t, v(s.speedKph), v(s.cadenceRpm), v(s.torqueNm),
           v(s.motorRpm), v(s.motorTempC), v(s.assistLevel), v(r.aset), v(s.batterySocPct),
           v(s.batteryVoltageMv), v(s.batteryCurrentMa), v(t[0]), v(t[1]), v(t[2]), v(t[3]),
-          s.rearGear ? s.rearGear.index : "", s.rearGear ? s.rearGear.max : ""].join(","));
+          s.rearGear ? s.rearGear.index : "", s.rearGear ? s.rearGear.max : "",
+          v(vt.hr), v(vt.rr), v(vt.fi)].join(","));
       }
       return rows.join("\n");
     }
