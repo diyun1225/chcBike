@@ -32,6 +32,9 @@
     BAT1_INFO01ACK: 0x1E942444, BAT1_INFO01BRO: 0x1E942446,
     BAT1_INFO06ACK: 0x1E942458, BAT1_INFO06BRO: 0x1E94245A,
     DERAILLEUR_STATE: 0x650,  // 新版 Derailleur State(Table 33):byte0=GearIndex, byte4=GearRange
+    // 舊版 REARDERAILLEUR_INFO00(byte0=目前檔, byte1=最大檔)。實測這台車仍用它回報檔位
+    // (0x650 這台不送),所以兩個都收,誰在 bus 上就用誰。
+    REARDERAILLEUR_INFO00ACK: 0x1E944840, REARDERAILLEUR_INFO00BRO: 0x1E944842,
   };
 
   // 來源優先序:GENERAL_INFO 一旦給過值就鎖定,忽略 DEVICE 來源的同名值(避免兩邊打架)。
@@ -151,10 +154,19 @@
           break;
 
         case ID.DERAILLEUR_STATE:
-          // byte0 = GearIndex(目前檔位),byte4 = GearRange(最大檔位範圍)
+          // 新版 0x650:byte0 = GearIndex(目前檔位),byte4 = GearRange(最大檔位範圍)
           if (dlc >= 1) {
             s.rearGearIndex = d[0];
             if (dlc >= 5) s.rearGearMax = d[4];
+            s.rearGearValid = true; s.rearGearSource = SRC.DEVICE;
+          }
+          break;
+
+        case ID.REARDERAILLEUR_INFO00ACK:
+        case ID.REARDERAILLEUR_INFO00BRO:
+          // 舊版 0x1E944840/42:byte0 = 目前檔,byte1 = 最大檔。實測這台車用這個回報檔位。
+          if (dlc >= 2) {
+            s.rearGearIndex = d[0]; s.rearGearMax = d[1];
             s.rearGearValid = true; s.rearGearSource = SRC.DEVICE;
           }
           break;
