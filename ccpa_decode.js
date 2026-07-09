@@ -31,7 +31,7 @@
     CONTROLLER_INFO03ACK: 0x1E94204C, CONTROLLER_INFO03BRO: 0x1E94204E,
     BAT1_INFO01ACK: 0x1E942444, BAT1_INFO01BRO: 0x1E942446,
     BAT1_INFO06ACK: 0x1E942458, BAT1_INFO06BRO: 0x1E94245A,
-    REARDERAILLEUR_INFO00ACK: 0x1E944840, REARDERAILLEUR_INFO00BRO: 0x1E944842,
+    DERAILLEUR_STATE: 0x650,  // 新版 Derailleur State(Table 33):byte0=GearIndex, byte4=GearRange
   };
 
   // 來源優先序:GENERAL_INFO 一旦給過值就鎖定,忽略 DEVICE 來源的同名值(避免兩邊打架)。
@@ -150,9 +150,13 @@
           }
           break;
 
-        case ID.REARDERAILLEUR_INFO00ACK:
-        case ID.REARDERAILLEUR_INFO00BRO:
-          if (dlc >= 2) { s.rearGearIndex = d[0]; s.rearGearMax = d[1]; s.rearGearValid = true; s.rearGearSource = SRC.DEVICE; }
+        case ID.DERAILLEUR_STATE:
+          // byte0 = GearIndex(目前檔位),byte4 = GearRange(最大檔位範圍)
+          if (dlc >= 1) {
+            s.rearGearIndex = d[0];
+            if (dlc >= 5) s.rearGearMax = d[4];
+            s.rearGearValid = true; s.rearGearSource = SRC.DEVICE;
+          }
           break;
 
         default:
