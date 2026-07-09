@@ -32,6 +32,20 @@
     <span id="modeAck">(等組員回 OK)</span>
   </p>
 
+  <p>騎乘模式(SET_MODE 0x1FA13000,每顆送不同 payload d0=模式碼):
+    <button class="rideModeBtn" data-mode="1" disabled>1 一般</button>
+    <button class="rideModeBtn" data-mode="2" disabled>2 電量管理</button>
+    <button class="rideModeBtn" data-mode="3" disabled>3 智慧輔助</button>
+    <button class="rideModeBtn" data-mode="4" disabled>4 智慧變速</button>
+    <button class="rideModeBtn" data-mode="5" disabled>5 智慧避震</button>
+    <span id="rideModeAck">(未選)</span>
+  </p>
+
+  <p>電子坐墊 Dropper(0x2940035,長按=解鎖 / 放開=鎖定):
+    <button id="dropperBtn" style="touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none" disabled>🔓 長按解鎖(放開鎖定)</button>
+    <span id="dropperState">🔒 鎖定</span>
+  </p>
+
   <p>原始指令(組員輸出的字串直接貼這裡送):
     <input id="rawCmdInput" type="text" placeholder="例:CAN,2940015,2,02,03" size="32" disabled />
     <button id="rawCmdBtn" disabled>送出</button>
@@ -60,6 +74,22 @@
 
     let rxChar = null; // 連線後拿到,用來送控制指令(SHIFT,UP / SHIFT,DOWN …)
     let commandedAssist = null; // 我們最後一次按的助力段位(這台車不回報段位,用它當畫面回饋)
+
+    // 騎乘模式(自訂協議 SET_MODE 0x1FA13000):DLC=1,payload 就是模式碼(1~5)
+    const RIDE_MODE_ID = "1FA13000";          // IoT→AI 命令 ID(hex 字串,直接塞進 CAN,<id>,...)
+    const RIDE_MODE_ACK_ID = 0x1FA23000;      // AI→IoT 回覆 ID(DATA= AA <模式碼>)
+    const RIDE_MODE_NAMES = { 1: "一般", 2: "電量管理", 3: "智慧輔助", 4: "智慧變速", 5: "智慧避震" };
+    let commandedRideMode = null;              // 最後一次按的模式(當畫面回饋)
+
+    // 電子坐墊 Dropper:網頁只送文字指令,實際 CAN frame(0x2940035:From Who/Sequence/
+    // Dropper Control)由 ESP32 control.cpp 的 control_set_dropper() 組出並送上匯流排。
+    //   長按 → "DROPPER,UNLOCK"(開閥=解鎖) / 放開 → "DROPPER,LOCK"(關閥=鎖定)
+    let dropperHeld = false;                   // 目前是否按住(避免重複送 open/close)
+
+    // 電子變速:目前檔位來自 Derailleur State 0x650(byte0=GearIndex)。這台實體 10 檔,只用 1~9。
+    const GEAR_MIN = 1, GEAR_MAX = 9;
+    let gearNow = null;                         // 目前檔位(0x650 讀回,權威值)
+    let gearHoldUntil = 0;                      // 剛手動變速後,短暫先信樂觀估計(讀回 500ms 才更新,避免連按超出)
 
     const dec = new CcpaDecoder();
     const td = new TextDecoder();
@@ -114,6 +144,11 @@
     // ── 解碼後顯示 ──────────────────────────────────────────────────────
     function show() {
       const s = dec.snapshot();
+      // 目前檔位:0x650 讀回是權威值,但剛手動變速後 gearHoldUntil 前先信樂觀估計
+      // (Derailleur State 每 500ms 才更新,不 hold 的話連按會被舊值放行而超出 9 檔)。
+      if (s.rearGear && s.rearGear.index != null && Date.now() >= gearHoldUntil) {
+        gearNow = s.rearGear.index;
+      }
       document.getElementById("out").textContent =
         "車速     : " + (s.speedKph        ?? "--") + " kph\n" +
         "踏頻     : " + (s.cadenceRpm       ?? "--") + " rpm\n" +
@@ -126,7 +161,7 @@
         "電壓     : " + (s.batteryVoltageMv ?? "--") + " mV\n" +
         "電流     : " + (s.batteryCurrentMa ?? "--") + " mA\n" +
         "電池溫度 : " + s.batteryTempsC.map(x => x ?? "--").join(", ") + " C\n" +
-        "後檔位   : " + (s.rearGear ? s.rearGear.index + "/" + s.rearGear.max : "--") + "\n" +
+        "目前檔位 : " + (gearNow != null ? gearNow + " / " + GEAR_MAX + "(車回報最大 " + (s.rearGear ? s.rearGear.max : "--") + ")" : "--") + "\n" +
         "心率 HR  : " + (vitals.hr ?? "--") + " bpm\n" +
         "呼吸率 RR: " + (vitals.rr ?? "--") + " brpm\n" +
         "FI       : " + (vitals.fi ?? "--");
@@ -188,6 +223,16 @@
           const t = new Date().toLocaleTimeString();
           document.getElementById("modeAck").textContent = `✓ 組員回 OK:${nm} @${t}`;
           log(`✓ 組員回 OK:${nm}`);
+          continue;   // 不是 CCPA 車況,不用進解碼器
+        }
+
+        // 自訂協議:騎乘模式 ACK(0x1FA23000 DATA= AA <模式碼>)→ 更新畫面
+        if (f.id === RIDE_MODE_ACK_ID && f.data[0] === 0xAA) {
+          const m = f.data[1];
+          const nm = RIDE_MODE_NAMES[m] || "?";
+          const t = new Date().toLocaleTimeString();
+          document.getElementById("rideModeAck").textContent = `✓ 已切換:${m} ${nm} @${t}`;
+          log(`✓ 組員回 OK:騎乘模式 ${m} ${nm}`);
           continue;   // 不是 CCPA 車況,不用進解碼器
         }
 
@@ -331,6 +376,9 @@
       document.getElementById("rawCmdBtn").disabled = !on;
       document.getElementById("modeTxBtn").disabled = !on;
       document.getElementById("modeRxBtn").disabled = !on;
+      document.querySelectorAll(".rideModeBtn").forEach(b => { b.disabled = !on; });
+      document.getElementById("dropperBtn").disabled = !on;
+      if (!on && dropperHeld) { dropperHeld = false; setDropperUI(false); } // 斷線時強制回鎖定顯示
       document.getElementById("recBtn").disabled = !on;
     }
 
@@ -427,8 +475,22 @@
     document.getElementById("dlBtn").addEventListener("click", downloadCsv);
     document.getElementById("copyBtn").addEventListener("click", copyCsv);
 
-    document.getElementById("shiftUpBtn").addEventListener("click", () => sendCmd("SHIFT,UP"));
-    document.getElementById("shiftDownBtn").addEventListener("click", () => sendCmd("SHIFT,DOWN"));
+    // 電子變速升/降檔:限制 1~9 檔(這台實體 10 檔但只用 1~9)。用 0x650 讀回的目前檔位擋。
+    // 韌體只送「升/降一檔」(SHIFT,UP/DOWN → 0x300),上下限在這裡把關。
+    function doShift(up) {
+      if (gearNow != null) {
+        if (up && gearNow >= GEAR_MAX) { log(`✗ 已達最高 ${GEAR_MAX} 檔,不再升`); return; }
+        if (!up && gearNow <= GEAR_MIN) { log(`✗ 已達最低 ${GEAR_MIN} 檔,不再降`); return; }
+      }
+      sendCmd(up ? "SHIFT,UP" : "SHIFT,DOWN");
+      if (gearNow != null) {                      // 樂觀更新,避免讀回延遲時連按超出
+        gearNow = Math.min(GEAR_MAX, Math.max(GEAR_MIN, gearNow + (up ? 1 : -1)));
+        gearHoldUntil = Date.now() + 800;         // 800ms 內先信估計,讓實體變速+讀回追上
+        show();
+      }
+    }
+    document.getElementById("shiftUpBtn").addEventListener("click", () => doShift(true));
+    document.getElementById("shiftDownBtn").addEventListener("click", () => doShift(false));
 
     // 自訂協議:切模式(送 CAN,<id>,0 → 韌體轉發到 CAN → AI 板回 OK)
     document.getElementById("modeTxBtn").addEventListener("click", () => {
@@ -440,6 +502,19 @@
       sendCmd("CAN,1FA10002,0");
     });
 
+    // 騎乘模式:按下 → 送 SET_MODE(DLC=1,payload 就是模式碼 1~5,每顆不同)。
+    // 韌體走通用 CAN,<id>,<dlc>,<b0> passthrough,不用改韌體。
+    const hex2 = n => (n & 0xFF).toString(16).toUpperCase().padStart(2, "0");
+    document.querySelectorAll(".rideModeBtn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const mode = parseInt(btn.dataset.mode, 10);
+        commandedRideMode = mode;
+        const nm = RIDE_MODE_NAMES[mode] || "?";
+        document.getElementById("rideModeAck").textContent = `(已送 ${mode} ${nm},等組員回 OK…)`;
+        sendCmd(`CAN,${RIDE_MODE_ID},1,${hex2(mode)}`);
+      });
+    });
+
     // 助力段位:按下 → 送 "ASSIST,<level>"(韌體 control_set_assist_level 收 0~5)
     document.querySelectorAll(".assistBtn").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -448,6 +523,33 @@
         show(); // 馬上更新畫面(不用等下一包)
       });
     });
+
+    // 電子坐墊 Dropper:長按=解鎖(送 DROPPER,UNLOCK)、放開=鎖定(送 DROPPER,LOCK)。
+    // 實際 CAN(0x2940035)由 ESP32 韌體組;網頁只送文字指令。用 pointer 事件同時支援滑鼠/觸控,
+    // 按下時 setPointerCapture 確保放開一定收得到 up(手指移出按鈕也算)。
+    const dropperBtn = document.getElementById("dropperBtn");
+    function setDropperUI(unlocked) {
+      document.getElementById("dropperState").textContent = unlocked ? "🔓 解鎖中(放開即鎖定)" : "🔒 鎖定";
+      dropperBtn.textContent = unlocked ? "🔓 解鎖中…(放開鎖定)" : "🔓 長按解鎖(放開鎖定)";
+    }
+    function dropperDown(e) {
+      e.preventDefault();
+      if (dropperHeld) return;
+      dropperHeld = true;
+      try { dropperBtn.setPointerCapture(e.pointerId); } catch (_) {}
+      sendCmd("DROPPER,UNLOCK");
+      setDropperUI(true);
+    }
+    function dropperUp() {
+      if (!dropperHeld) return;
+      dropperHeld = false;
+      sendCmd("DROPPER,LOCK");
+      setDropperUI(false);
+    }
+    dropperBtn.addEventListener("pointerdown", dropperDown);
+    dropperBtn.addEventListener("pointerup", dropperUp);
+    dropperBtn.addEventListener("pointercancel", dropperUp);
+    dropperBtn.addEventListener("contextmenu", (e) => e.preventDefault()); // 手機長按不跳選單
 
     // 原始指令:按「送出」或在輸入框按 Enter 都送
     document.getElementById("rawCmdBtn").addEventListener("click", sendRawCmd);
