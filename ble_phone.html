@@ -12,6 +12,7 @@
   <button id="clearBtn">清空</button>
   <p id="status">單車:尚未連線</p>
   <p id="aiStatus">毫米波板:尚未連線</p>
+  <p id="mqttStatus">MQTT(生理→雲):未連線</p>
 
   <h4>控制</h4>
   <button id="shiftUpBtn" disabled>升檔 ▲</button>
@@ -36,14 +37,25 @@
     <button class="rideModeBtn" data-mode="1" disabled>1 一般</button>
     <button class="rideModeBtn" data-mode="2" disabled>2 電量管理</button>
     <button class="rideModeBtn" data-mode="3" disabled>3 智慧輔助</button>
-    <button class="rideModeBtn" data-mode="4" disabled>4 智慧變速</button>
-    <button class="rideModeBtn" data-mode="5" disabled>5 智慧避震</button>
     <span id="rideModeAck">(未選)</span>
+  </p>
+
+  <p>避震硬度(0x294003B,1 最軟 ~ 5 最硬 → byte1 0x81~0x85):
+    <button class="suspBtn" data-level="1" disabled>1 最軟</button>
+    <button class="suspBtn" data-level="2" disabled>2</button>
+    <button class="suspBtn" data-level="3" disabled>3</button>
+    <button class="suspBtn" data-level="4" disabled>4</button>
+    <button class="suspBtn" data-level="5" disabled>5 最硬</button>
+    <span id="suspAck">(未選)</span>
   </p>
 
   <p>電子坐墊 Dropper(0x2940035,長按=解鎖 / 放開=鎖定):
     <button id="dropperBtn" style="touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none" disabled>🔓 長按解鎖(放開鎖定)</button>
     <span id="dropperState">🔒 鎖定</span>
+  </p>
+
+  <p>系統關機(0x2940005 System Control,Turning System=0x00 System Off → 電池斷電):
+    <button id="systemOffBtn" disabled>⏻ 關機(斷電)</button>
   </p>
 
   <p>原始指令(組員輸出的字串直接貼這裡送):
@@ -66,6 +78,8 @@
   <h4>原始封包(最新在最上面)</h4>
   <pre id="raw">(尚未收到封包)</pre>
 
+  <!-- MQTT over WebSocket 用戶端(把毫米波 hr/rr/fi 發到 broker)。正式站要完全自帶就把它下載到本地改成 src="mqtt.min.js" -->
+  <script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
   <script src="ccpa_decode.js"></script>
   <script>
     const SERVICE = "0000cc01-c3d5-40b4-ab51-611746a316f3";
@@ -78,7 +92,10 @@
     // 騎乘模式(自訂協議 SET_MODE 0x1FA13000):DLC=1,payload 就是模式碼(1~5)
     const RIDE_MODE_ID = "1FA13000";          // IoT→AI 命令 ID(hex 字串,直接塞進 CAN,<id>,...)
     const RIDE_MODE_ACK_ID = 0x1FA23000;      // AI→IoT 回覆 ID(DATA= AA <模式碼>)
-    const RIDE_MODE_NAMES = { 1: "一般", 2: "電量管理", 3: "智慧輔助", 4: "智慧變速", 5: "智慧避震" };
+    const RIDE_MODE_NAMES = { 1: "一般", 2: "電量管理", 3: "智慧輔助" };
+
+    // 生理數據(自訂協議 MMWAVE 0x1FA15000):DLC=2,d0=hr d1=rr(0xFF = 無效)
+    const MMWAVE_ID = "1FA15000";             // IoT→AI(見 PHONE_IOT_AI_CAN_PROTOCOL.md)
     let commandedRideMode = null;              // 最後一次按的模式(當畫面回饋)
 
     // 電子坐墊 Dropper:網頁只送文字指令,實際 CAN frame(0x2940035:From Who/Sequence/
@@ -123,6 +140,43 @@
       return name ? `${lvl} (${name})` : String(lvl);
     }
 
+    // ── 毫米波生理資料 → MQTT(發到 ouo/v1/vehicle/state,source:"hr")────────────
+    // ⚠️ 瀏覽器不能連原生 MQTT(1883),只能走 MQTT over WebSocket。
+    //    這台 broker 是 EMQX(118.163.180.29),WebSocket 埠實測:8083(ws)、8084(wss,TLS),路徑要 /mqtt。
+    //    依網頁協定自動選:
+    //      本機/http  → ws://…:8083/mqtt (明文)
+    //      正式站/https → wss://…:8084/mqtt(必須,否則被瀏覽器擋 mixed content)
+    const MQTT_WS_URL = (location.protocol === "https:")
+      ? "wss://118.163.180.29:8084/mqtt"
+      : "ws://118.163.180.29:8083/mqtt";
+    const MQTT_STATE_TOPIC = "ouo/v1/vehicle/state";
+    let mqttClient = null;
+    function setMqttStatus(t) { const el = document.getElementById("mqttStatus"); if (el) el.textContent = "MQTT(生理→雲):" + t; }
+    function mqttEnsure() {
+      if (mqttClient) return;                                   // 已連/連線中就不重複建
+      if (typeof mqtt === "undefined") { setMqttStatus("mqtt.js 未載入(檢查網路/CDN)"); return; }
+      try {
+        setMqttStatus("連線中… " + MQTT_WS_URL);
+        mqttClient = mqtt.connect(MQTT_WS_URL, {
+          reconnectPeriod: 3000, connectTimeout: 4000,
+          clientId: "web-hr-" + Math.random().toString(16).slice(2, 8),
+        });
+        mqttClient.on("connect",   () => { setMqttStatus("已連線"); log("✅ MQTT 已連線 " + MQTT_WS_URL); });
+        mqttClient.on("reconnect", () => setMqttStatus("重連中…"));
+        mqttClient.on("close",     () => setMqttStatus("已斷線"));
+        mqttClient.on("error",     (e) => { setMqttStatus("錯誤:" + e.message); log("✗ MQTT 錯誤:" + e.message); });
+      } catch (e) { log("✗ MQTT 連線失敗:" + e.message); setMqttStatus("連線失敗:" + e.message); }
+    }
+    // 把目前 hr/rr/fi 打包成 source:"hr" 一包發出去(欄位名對齊 t.txt schema)。
+    function publishVitals() {
+      if (!mqttClient || !mqttClient.connected) return;         // 還沒連上就先不發(等連上後下一包再送)
+      const msg = { source: "hr", timestamp_ms: Date.now() };
+      if (vitals.hr != null) msg.heart_rate_bpm = vitals.hr;    // 心率 bpm
+      if (vitals.rr != null) msg.r_rate_bpm     = vitals.rr;    // 呼吸率 bpm
+      if (vitals.fi != null) msg.fatigue_pct    = vitals.fi;    // 疲憊值(百分比;schema 沒有此欄,額外帶,原樣不縮放)
+      mqttClient.publish(MQTT_STATE_TOPIC, JSON.stringify(msg));
+    }
+
     // ── AI 板生理量測(心率 HR / 呼吸率 RR / FI)────────────────────────
     // 走同一個 TX 特徵(UUID 相同),但送的是純 JSON 一行(不是 ID= 的 CAN 封包),例:
     //   {"hr":72,"rr":16,"fi":0.83}
@@ -139,6 +193,26 @@
       if (hr !== undefined) vitals.hr = hr;
       if (rr !== undefined) vitals.rr = rr;
       if (fi !== undefined) vitals.fi = fi;
+      // 收到生理資料 → 連上 MQTT(第一次)並打包發到 vehicle/state(source:"hr")
+      mqttEnsure();
+      publishVitals();
+      sendMmwaveCan();                       // 同一份 hr/rr 再轉一包 CAN 給 AI 板
+    }
+
+    // ── hr/rr 轉發到 CAN(MMWAVE 0x1FA15000, DLC=2)────────────────────
+    // AI 板要的是 CAN 上的 hr/rr,所以收到 BLE JSON 後原樣再轉一包 CAN 送出。
+    // 走韌體既有的通用 passthrough "CAN,<id>,<dlc>,..."(同切模式做法),韌體不用改。
+    // fi 不送 —— AI 板不需要,維持只走 BLE/MQTT。
+    const MMWAVE_RESEND_MS = 1000;           // 節流:最多每秒一包(對齊協定文件的「定期發送」)
+    let mmwaveLastSentMs = 0;
+    function sendMmwaveCan() {
+      if (!rxChar) return;                   // 沒連線就靜靜跳過(不要洗 log)
+      const now = Date.now();
+      if (now - mmwaveLastSentMs < MMWAVE_RESEND_MS) return;
+      mmwaveLastSentMs = now;
+      // null → 0xFF(無效值);有值則夾在 0~254,免得真實值 255 被誤讀成 null
+      const b = (v) => hex2(v == null ? 0xFF : Math.min(254, Math.max(0, Math.round(v))));
+      sendCmd(`CAN,${MMWAVE_ID},2,${b(vitals.hr)},${b(vitals.rr)}`);
     }
 
     // ── 解碼後顯示 ──────────────────────────────────────────────────────
@@ -377,7 +451,9 @@
       document.getElementById("modeTxBtn").disabled = !on;
       document.getElementById("modeRxBtn").disabled = !on;
       document.querySelectorAll(".rideModeBtn").forEach(b => { b.disabled = !on; });
+      document.querySelectorAll(".suspBtn").forEach(b => { b.disabled = !on; });
       document.getElementById("dropperBtn").disabled = !on;
+      document.getElementById("systemOffBtn").disabled = !on;
       if (!on && dropperHeld) { dropperHeld = false; setDropperUI(false); } // 斷線時強制回鎖定顯示
       document.getElementById("recBtn").disabled = !on;
     }
@@ -389,8 +465,8 @@
       sendCmd(cmd);
     }
 
-    // ── 資料記錄:固定 5Hz 取樣目前解碼快照 → 存陣列 → 匯出 CSV ────────────
-    const REC_HZ = 5;                 // 每秒取樣筆數(0.2 秒一筆)
+    // ── 資料記錄:固定週期取樣目前解碼快照 → 存陣列 → 匯出 CSV ────────────
+    const REC_MS = 90;                // 每筆間隔(ms)。90ms≈11Hz,貼著 ESP32 80ms 批次節奏
     let recording = false;
     let recTimer = null;
     let recStart = 0;
@@ -417,10 +493,10 @@
       if (recording) {
         recRows.length = 0;                    // 每次開始 = 全新一段
         recStart = Date.now();
-        recTimer = setInterval(recSample, Math.round(1000 / REC_HZ));
+        recTimer = setInterval(recSample, REC_MS);
         btn.textContent = "⏹ 停止記錄";
         try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
-        log("⏺ 開始記錄(" + REC_HZ + " Hz)");
+        log("⏺ 開始記錄(每 " + REC_MS + " ms)");
       } else {
         clearInterval(recTimer); recTimer = null;
         try { if (wakeLock) await wakeLock.release(); } catch (e) {}
@@ -435,7 +511,7 @@
       const head = ["time_iso", "t_ms", "speed_kph", "cadence_rpm", "torque_nm",
         "motor_rpm", "motor_temp_c", "assist_report", "assist_set", "soc_pct",
         "voltage_mv", "current_ma", "bat_t0", "bat_t1", "bat_t2", "bat_t3",
-        "gear_index", "gear_max", "hr_bpm", "rr_brpm", "fi"];
+        "current_gear", "hr_bpm", "rr_brpm", "fi"];
       const v = x => (x === null || x === undefined) ? "" : x;
       const rows = [head.join(",")];
       for (const r of recRows) {
@@ -443,7 +519,7 @@
         rows.push([r.iso, r.t, v(s.speedKph), v(s.cadenceRpm), v(s.torqueNm),
           v(s.motorRpm), v(s.motorTempC), v(s.assistLevel), v(r.aset), v(s.batterySocPct),
           v(s.batteryVoltageMv), v(s.batteryCurrentMa), v(t[0]), v(t[1]), v(t[2]), v(t[3]),
-          s.rearGear ? s.rearGear.index : "", s.rearGear ? s.rearGear.max : "",
+          s.rearGear ? s.rearGear.index : "",
           v(vt.hr), v(vt.rr), v(vt.fi)].join(","));
       }
       return rows.join("\n");
@@ -515,6 +591,15 @@
       });
     });
 
+    // 避震硬度:按下 → 送 "FORK,<1~5>"(韌體 control_set_frontfork,byte1=0x80+檔位=0x81~0x85)
+    document.querySelectorAll(".suspBtn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const lvl = btn.dataset.level;
+        sendCmd("FORK," + lvl);
+        document.getElementById("suspAck").textContent = `(已送 ${lvl})`;
+      });
+    });
+
     // 助力段位:按下 → 送 "ASSIST,<level>"(韌體 control_set_assist_level 收 0~5)
     document.querySelectorAll(".assistBtn").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -550,6 +635,14 @@
     dropperBtn.addEventListener("pointerup", dropperUp);
     dropperBtn.addEventListener("pointercancel", dropperUp);
     dropperBtn.addEventListener("contextmenu", (e) => e.preventDefault()); // 手機長按不跳選單
+
+    // 系統關機:送 SYSTEM,OFF → 韌體 control_set_system(0x00) 組出 0x2940005 frame
+    // (Turning System=0x00 System Off),車體收到後電池停止供電。屬不可逆動作,先二次確認。
+    document.getElementById("systemOffBtn").addEventListener("click", () => {
+      if (!confirm("確定要關機?這會讓車體斷電、電池停止供電,需重新開機才會恢復。")) return;
+      sendCmd("SYSTEM,OFF");
+      log("⏻ 已送系統關機(SYSTEM,OFF → 0x2940005 Turning System=0x00)");
+    });
 
     // 原始指令:按「送出」或在輸入框按 Enter 都送
     document.getElementById("rawCmdBtn").addEventListener("click", sendRawCmd);
